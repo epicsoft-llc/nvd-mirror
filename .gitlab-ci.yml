@@ -1,0 +1,35 @@
+# NVD datafeed mirror -> GitLab Pages (daily via pipeline schedule), fronted by Cloudflare.
+#
+# Requires the masked CI/CD variable NVD_API_KEY (NVD API key, no surrounding whitespace).
+# The 'pages' job is the name GitLab Pages expects; the 'public/' directory is published as the
+# Pages site.
+
+stages:
+  - deploy
+
+pages:
+  stage: deploy
+  image:
+    name: ghcr.io/jeremylong/open-vulnerability-data-mirror:latest
+    entrypoint: [""]
+  # First run downloads the full NVD (can take a while); subsequent runs are incremental.
+  cache:
+    key: nvd-mirror-cache-v1
+    paths:
+      - nvd-cache/
+  script:
+    - mkdir -p nvd-cache public
+    # Incremental: vulnz reuses the existing cache and only fetches changes
+    # (static files via the NVD API, generated centrally once -> consumers later pull only .json.gz).
+    - vulnz cve --cache --directory nvd-cache --delay 2000 --maxRetry 50
+    # Copy the generated feed into the Pages directory.
+    - cp nvd-cache/nvdcve-*.json.gz public/
+    - cp nvd-cache/cache.properties public/
+    - cp nvd-cache/*.meta public/ 2>/dev/null || true
+  artifacts:
+    paths:
+      - public
+  tags: [ "epicsoft" ]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'

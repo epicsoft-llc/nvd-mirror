@@ -1,0 +1,5 @@
+# GitLab Pages custom response headers.
+# Cloudflare additionally caches via a Cache Rule (*.json.gz). These headers are the origin backup
+# and drive the edge TTL when Cloudflare is set to "Respect origin".
+/*
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400

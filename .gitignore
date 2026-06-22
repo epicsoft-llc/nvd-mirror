@@ -1,0 +1,8 @@
+# Local generation cache (large, regenerable)
+nvd-cache/
+
+# In public/ only source files (index.html, _headers) are versioned -- ignore generated feed files
+public/*.json.gz
+public/*.meta
+public/cache.properties
+CLAUDE.md

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NVD Datafeed Mirror</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+    code, pre { background: #f4f4f4; border-radius: 4px; }
+    code { padding: .1rem .3rem; }
+    pre { padding: 1rem; overflow-x: auto; }
+    .muted { color: #666; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <h1>NVD Datafeed Mirror</h1>
+  <p>
+    Static mirror of the <strong>NVD API datafeed</strong> (gzipped JSON files) for use with
+    <a href="https://owasp.org/www-project-dependency-check/">OWASP Dependency-Check</a> &mdash;
+    no NVD API key, no pagination, no rate limiting. Updated daily.
+  </p>
+
+  <h2>Usage</h2>
+  <pre>dependency-check --updateonly \
+  --nvdDatafeed https://nvd.&lt;domain&gt;/nvdcve-{0}.json.gz</pre>
+  <p class="muted">The <code>{0}</code> placeholder is replaced by the year for each file.</p>
+
+  <h2>Files</h2>
+  <ul>
+    <li><code>nvdcve-2002.json.gz</code> &hellip; <code>nvdcve-&lt;year&gt;.json.gz</code></li>
+    <li><code>nvdcve-modified.json.gz</code></li>
+    <li><code>cache.properties</code></li>
+  </ul>
+
+  <p class="muted">
+    NVD data is US Government public domain. Generated with
+    <a href="https://github.com/jeremylong/open-vulnerability-cli">open-vulnerability-cli (vulnz)</a>.
+  </p>
+</body>
+</html>

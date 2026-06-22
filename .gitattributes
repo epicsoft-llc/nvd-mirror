@@ -1,0 +1,4 @@
+# Enforce LF so shell scripts and CI YAML run correctly inside the Linux container.
+* text=auto eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
