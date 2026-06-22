@@ -20,6 +20,11 @@ pages:
   # The published Pages site is the durable fallback for the CI cache below.
   variables:
     MIRROR_BASE: "https://nvd.epicsoft.one"
+    # vulnz is a Java app; the default max heap (~25% of container RAM) OOMs on a full NVD run.
+    # The vulnz CLI wrapper reads JAVA_OPTS (the docker entrypoint would use JAVA_OPT, but we
+    # bypass it via entrypoint: [""] and call vulnz directly). UseStringDeduplication is the
+    # memory-saving flag the upstream docs recommend for the OutOfMemoryError.
+    JAVA_OPTS: "-Xmx3277m -XX:+UseStringDeduplication"
   script:
     - mkdir -p nvd-cache public
     # Fallback if the (non-guaranteed) CI cache was evicted/cleared: reseed nvd-cache/ from the
