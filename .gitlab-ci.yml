@@ -21,7 +21,7 @@ pages:
     - mkdir -p nvd-cache public
     # Incremental: vulnz reuses the existing cache and only fetches changes
     # (static files via the NVD API, generated centrally once -> consumers later pull only .json.gz).
-    - vulnz cve --cache --directory nvd-cache --delay 2000 --maxRetry 50
+    - vulnz cve --cache --directory nvd-cache --delay 6000 --maxRetry 50 --debug
     # Copy the generated feed into the Pages directory.
     - cp nvd-cache/nvdcve-*.json.gz public/
     - cp nvd-cache/cache.properties public/
