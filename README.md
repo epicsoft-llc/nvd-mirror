@@ -17,20 +17,20 @@ GitLab CI (daily, schedule)
     3. nvd-cache/*.json.gz + cache.properties -> public/
     4. GitLab Pages deploys public/
         |
-   Cloudflare Free (subdomain nvd.<domain>, Cache Rule *.json.gz)
+   Cloudflare Free (subdomain nvd.epicsoft.one, Cache Rule *.json.gz)
         |
-   Consumer:  dependency-check --nvdDatafeed https://nvd.<domain>/nvdcve-{0}.json.gz
+   Consumer:  dependency-check --nvdDatafeed https://nvd.epicsoft.one/nvdcve-{0}.json.gz
 ```
 
 ## Consumer usage
 
 ```bash
 dependency-check --updateonly \
-  --nvdDatafeed https://nvd.<domain>/nvdcve-{0}.json.gz
+  --nvdDatafeed https://nvd.epicsoft.one/nvdcve-{0}.json.gz
 ```
 
 In the sibling `dependencycheck` project this maps to `run-local-df.sh` resp. the CI `Update` job
-(`DC_DATAFEED_URL='https://nvd.<domain>/nvdcve-{0}.json.gz'`).
+(`DC_DATAFEED_URL='https://nvd.epicsoft.one/nvdcve-{0}.json.gz'`).
 
 ## Local generation / test
 
@@ -44,7 +44,7 @@ NVD_API_KEY='<key>' ./generate-datafeed.sh
 1. **CI/CD variable** `NVD_API_KEY` (Settings → CI/CD → Variables; *masked*, no whitespace).
 2. **Pipeline schedule** (Settings → CI/CD → Pipeline schedules) → daily, target `main`.
    (The `pages` job only runs on `schedule` or a manual web trigger.)
-3. **GitLab Pages custom domain** (Deploy → Pages → New Domain): `nvd.<domain>` →
+3. **GitLab Pages custom domain** (Deploy → Pages → New Domain): `nvd.epicsoft.one` →
    GitLab returns a **TXT verification record** and the CNAME target `epicsoft-networks.gitlab.io`.
 4. **Cloudflare DNS:**
    - Add the TXT verification record (**DNS only / grey**).
@@ -60,5 +60,5 @@ NVD_API_KEY='<key>' ./generate-datafeed.sh
   incremental via the CI cache.
 - The `.json.gz` files must be served **raw** (`Content-Type: application/gzip`, **no**
   `Content-Encoding: gzip`) — otherwise Cloudflare/clients decompress them and Dependency-Check
-  receives corrupt data. Verify with `curl -sI https://nvd.<domain>/nvdcve-2024.json.gz`.
+  receives corrupt data. Verify with `curl -sI https://nvd.epicsoft.one/nvdcve-2024.json.gz`.
 - NVD data is US Government public domain → redistribution is permitted.

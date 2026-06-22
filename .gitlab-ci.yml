@@ -17,8 +17,30 @@ pages:
     key: nvd-mirror-cache-v1
     paths:
       - nvd-cache/
+  # The published Pages site is the durable fallback for the CI cache below.
+  variables:
+    MIRROR_BASE: "https://nvd.epicsoft.one"
   script:
     - mkdir -p nvd-cache public
+    # Fallback if the (non-guaranteed) CI cache was evicted/cleared: reseed nvd-cache/ from the
+    # already-published Pages files so vulnz can resume incrementally instead of doing a full
+    # multi-hour NVD download. cache.properties carries the lastModified timestamps vulnz needs.
+    - |
+      if [ ! -f nvd-cache/cache.properties ]; then
+        echo "CI cache empty -> reseeding nvd-cache from $MIRROR_BASE"
+        if curl -fsSL "$MIRROR_BASE/cache.properties" -o nvd-cache/cache.properties; then
+          for y in $(seq 2002 "$(date +%Y)") modified; do
+            curl -fsSL "$MIRROR_BASE/nvdcve-${y}.json.gz" -o "nvd-cache/nvdcve-${y}.json.gz" \
+              || rm -f "nvd-cache/nvdcve-${y}.json.gz"
+            curl -fsSL "$MIRROR_BASE/nvdcve-${y}.meta" -o "nvd-cache/nvdcve-${y}.meta" \
+              || rm -f "nvd-cache/nvdcve-${y}.meta"
+          done
+          echo "reseeded $(ls nvd-cache/nvdcve-*.json.gz 2>/dev/null | wc -l) feed files from Pages"
+        else
+          echo "no published mirror yet -> full NVD download"
+          rm -f nvd-cache/cache.properties
+        fi
+      fi
     # Incremental: vulnz reuses the existing cache and only fetches changes
     # (static files via the NVD API, generated centrally once -> consumers later pull only .json.gz).
     - vulnz cve --cache --directory nvd-cache --delay 6000 --maxRetry 50 --debug

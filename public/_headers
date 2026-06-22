@@ -3,3 +3,8 @@
 # and drive the edge TTL when Cloudflare is set to "Respect origin".
 /*
   Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+
+# Keep the datafeed files out of search engine indexes (the .json.gz are not HTML,
+# so the index.html <meta robots> does not apply to them).
+/*.json.gz
+  X-Robots-Tag: noindex
