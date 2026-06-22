@@ -62,3 +62,8 @@ NVD_API_KEY='<key>' ./generate-datafeed.sh
   `Content-Encoding: gzip`) — otherwise Cloudflare/clients decompress them and Dependency-Check
   receives corrupt data. Verify with `curl -sI https://nvd.epicsoft.one/nvdcve-2024.json.gz`.
 - NVD data is US Government public domain → redistribution is permitted.
+
+## License
+
+This project's infrastructure (CI, scripts, HTML) is licensed under the [MIT License](LICENSE).
+The mirrored NVD data is US Government public domain.
