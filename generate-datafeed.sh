@@ -14,11 +14,17 @@ IMAGE="ghcr.io/jeremylong/open-vulnerability-data-mirror:latest"
 OUT="${PWD}/nvd-cache"
 mkdir -p "${OUT}"
 
-docker run --rm \
+# A full NVD build needs a large Java heap; the CI runner is capped at 4g (OOMs), so do the initial
+# full build here where more RAM is available. We call vulnz directly (--entrypoint vulnz), so it
+# reads JAVA_OPTS (plural). Ensure Docker Desktop's VM has more RAM than -Xmx (e.g. >8g for -Xmx8g).
+JAVA_OPTS="${JAVA_OPTS:--Xmx8g -XX:+UseStringDeduplication}"
+
+docker run --rm --name nvd-data-mirror \
   -e NVD_API_KEY="${NVD_API_KEY}" \
+  -e JAVA_OPTS="${JAVA_OPTS}" \
   -v "${OUT}:/cache" \
   --entrypoint vulnz "${IMAGE}" \
-  cve --cache --directory /cache --delay 2000 --maxRetry 50
+  cve --cache --directory /cache --delay 6000 --maxRetry 50 --debug
 
 echo "---"
 echo "Done. Generated files in ${OUT}:"

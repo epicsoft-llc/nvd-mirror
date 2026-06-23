@@ -1,6 +1,9 @@
 # Local generation cache (large, regenerable)
 nvd-cache/
 
+# Local bootstrap script holding secrets (NVD_API_KEY, GITLAB_TOKEN)
+run-local.sh
+
 # In public/ only source files (index.html, _headers) are versioned -- ignore generated feed files
 public/*.json.gz
 public/*.meta

@@ -27,6 +27,28 @@ pages:
     JAVA_OPTS: "-Xmx3277m -XX:+UseStringDeduplication"
   script:
     - mkdir -p nvd-cache public
+    # One-time bootstrap: a full NVD build OOMs on the 4g runner, so the first cache is built
+    # locally (generate-datafeed.sh) and uploaded to this project's generic package registry.
+    # Trigger a web pipeline with the CI variable SEED_VERSION=<version> to pull it in once; the
+    # block is inert otherwise. After the first successful publish, Pages is the durable source
+    # (reseed below) and SEED_VERSION can be removed.
+    - |
+      if [ -n "${SEED_VERSION:-}" ] && [ ! -f nvd-cache/cache.properties ]; then
+        echo "one-time seed: fetching prebuilt feed from package registry (nvd-seed/$SEED_VERSION)"
+        pkg="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/nvd-seed/${SEED_VERSION}"
+        if curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/cache.properties" -o nvd-cache/cache.properties; then
+          for y in $(seq 2002 "$(date +%Y)") modified; do
+            curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/nvdcve-${y}.json.gz" -o "nvd-cache/nvdcve-${y}.json.gz" \
+              || rm -f "nvd-cache/nvdcve-${y}.json.gz"
+            curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/nvdcve-${y}.meta" -o "nvd-cache/nvdcve-${y}.meta" \
+              || rm -f "nvd-cache/nvdcve-${y}.meta"
+          done
+          echo "seeded $(ls nvd-cache/nvdcve-*.json.gz 2>/dev/null | wc -l) feed files from package registry"
+        else
+          echo "seed package nvd-seed/$SEED_VERSION not found -> falling back"
+          rm -f nvd-cache/cache.properties
+        fi
+      fi
     # Fallback if the (non-guaranteed) CI cache was evicted/cleared: reseed nvd-cache/ from the
     # already-published Pages files so vulnz can resume incrementally instead of doing a full
     # multi-hour NVD download. cache.properties carries the lastModified timestamps vulnz needs.
