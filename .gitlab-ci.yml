@@ -20,61 +20,66 @@ pages:
   # The published Pages site is the durable fallback for the CI cache below.
   variables:
     MIRROR_BASE: "https://nvd.epicsoft.one"
+    # Use an ABSOLUTE cache dir: the vulnz wrapper resolves a relative --directory against its own
+    # workdir (/usr/local/bin), not the GitLab build dir, so a relative path makes vulnz read/write
+    # a different folder than our seed/reseed/cp -> it never finds cache.properties and always does
+    # a full download. CI cache:paths stays relative (nvd-cache/) as GitLab expects.
+    CACHE_DIR: "${CI_PROJECT_DIR}/nvd-cache"
     # vulnz is a Java app; the default max heap (~25% of container RAM) OOMs on a full NVD run.
     # The vulnz CLI wrapper reads JAVA_OPTS (the docker entrypoint would use JAVA_OPT, but we
     # bypass it via entrypoint: [""] and call vulnz directly). UseStringDeduplication is the
     # memory-saving flag the upstream docs recommend for the OutOfMemoryError.
     JAVA_OPTS: "-Xmx3277m -XX:+UseStringDeduplication"
   script:
-    - mkdir -p nvd-cache public
+    - mkdir -p "$CACHE_DIR" public
     # One-time bootstrap: a full NVD build OOMs on the 4g runner, so the first cache is built
     # locally (generate-datafeed.sh) and uploaded to this project's generic package registry.
     # Trigger a web pipeline with the CI variable SEED_VERSION=<version> to pull it in once; the
     # block is inert otherwise. After the first successful publish, Pages is the durable source
     # (reseed below) and SEED_VERSION can be removed.
     - |
-      if [ -n "${SEED_VERSION:-}" ] && [ ! -f nvd-cache/cache.properties ]; then
+      if [ -n "${SEED_VERSION:-}" ] && [ ! -f "$CACHE_DIR/cache.properties" ]; then
         echo "one-time seed: fetching prebuilt feed from package registry (nvd-seed/$SEED_VERSION)"
         pkg="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/nvd-seed/${SEED_VERSION}"
-        if curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/cache.properties" -o nvd-cache/cache.properties; then
+        if curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/cache.properties" -o "$CACHE_DIR/cache.properties"; then
           for y in $(seq 2002 "$(date +%Y)") modified; do
-            curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/nvdcve-${y}.json.gz" -o "nvd-cache/nvdcve-${y}.json.gz" \
-              || rm -f "nvd-cache/nvdcve-${y}.json.gz"
-            curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/nvdcve-${y}.meta" -o "nvd-cache/nvdcve-${y}.meta" \
-              || rm -f "nvd-cache/nvdcve-${y}.meta"
+            curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/nvdcve-${y}.json.gz" -o "$CACHE_DIR/nvdcve-${y}.json.gz" \
+              || rm -f "$CACHE_DIR/nvdcve-${y}.json.gz"
+            curl -fsSL --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "$pkg/nvdcve-${y}.meta" -o "$CACHE_DIR/nvdcve-${y}.meta" \
+              || rm -f "$CACHE_DIR/nvdcve-${y}.meta"
           done
-          echo "seeded $(ls nvd-cache/nvdcve-*.json.gz 2>/dev/null | wc -l) feed files from package registry"
+          echo "seeded $(ls "$CACHE_DIR"/nvdcve-*.json.gz 2>/dev/null | wc -l) feed files from package registry"
         else
           echo "seed package nvd-seed/$SEED_VERSION not found -> falling back"
-          rm -f nvd-cache/cache.properties
+          rm -f "$CACHE_DIR/cache.properties"
         fi
       fi
-    # Fallback if the (non-guaranteed) CI cache was evicted/cleared: reseed nvd-cache/ from the
-    # already-published Pages files so vulnz can resume incrementally instead of doing a full
-    # multi-hour NVD download. cache.properties carries the lastModified timestamps vulnz needs.
+    # Fallback if the (non-guaranteed) CI cache was evicted/cleared: reseed from the already-published
+    # Pages files so vulnz can resume incrementally instead of doing a full multi-hour NVD download.
+    # cache.properties carries the lastModified timestamps vulnz needs.
     - |
-      if [ ! -f nvd-cache/cache.properties ]; then
-        echo "CI cache empty -> reseeding nvd-cache from $MIRROR_BASE"
-        if curl -fsSL "$MIRROR_BASE/cache.properties" -o nvd-cache/cache.properties; then
+      if [ ! -f "$CACHE_DIR/cache.properties" ]; then
+        echo "CI cache empty -> reseeding $CACHE_DIR from $MIRROR_BASE"
+        if curl -fsSL "$MIRROR_BASE/cache.properties" -o "$CACHE_DIR/cache.properties"; then
           for y in $(seq 2002 "$(date +%Y)") modified; do
-            curl -fsSL "$MIRROR_BASE/nvdcve-${y}.json.gz" -o "nvd-cache/nvdcve-${y}.json.gz" \
-              || rm -f "nvd-cache/nvdcve-${y}.json.gz"
-            curl -fsSL "$MIRROR_BASE/nvdcve-${y}.meta" -o "nvd-cache/nvdcve-${y}.meta" \
-              || rm -f "nvd-cache/nvdcve-${y}.meta"
+            curl -fsSL "$MIRROR_BASE/nvdcve-${y}.json.gz" -o "$CACHE_DIR/nvdcve-${y}.json.gz" \
+              || rm -f "$CACHE_DIR/nvdcve-${y}.json.gz"
+            curl -fsSL "$MIRROR_BASE/nvdcve-${y}.meta" -o "$CACHE_DIR/nvdcve-${y}.meta" \
+              || rm -f "$CACHE_DIR/nvdcve-${y}.meta"
           done
-          echo "reseeded $(ls nvd-cache/nvdcve-*.json.gz 2>/dev/null | wc -l) feed files from Pages"
+          echo "reseeded $(ls "$CACHE_DIR"/nvdcve-*.json.gz 2>/dev/null | wc -l) feed files from Pages"
         else
           echo "no published mirror yet -> full NVD download"
-          rm -f nvd-cache/cache.properties
+          rm -f "$CACHE_DIR/cache.properties"
         fi
       fi
     # Incremental: vulnz reuses the existing cache and only fetches changes
     # (static files via the NVD API, generated centrally once -> consumers later pull only .json.gz).
-    - vulnz cve --cache --directory nvd-cache --delay 6000 --maxRetry 50 --debug
+    - vulnz cve --cache --directory "$CACHE_DIR" --delay 6000 --maxRetry 50 --debug
     # Copy the generated feed into the Pages directory.
-    - cp nvd-cache/nvdcve-*.json.gz public/
-    - cp nvd-cache/cache.properties public/
-    - cp nvd-cache/*.meta public/ 2>/dev/null || true
+    - cp "$CACHE_DIR"/nvdcve-*.json.gz public/
+    - cp "$CACHE_DIR/cache.properties" public/
+    - cp "$CACHE_DIR"/*.meta public/ 2>/dev/null || true
   artifacts:
     paths:
       - public
