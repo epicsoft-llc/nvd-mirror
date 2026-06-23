@@ -6,6 +6,7 @@
 
 stages:
   - deploy
+  - trigger
 
 pages:
   stage: deploy
@@ -93,6 +94,15 @@ pages:
     # Auto-clean old daily artifacts; the latest stays published ("Keep latest artifacts").
     expire_in: 2 days
   tags: [ "epicsoft" ]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+trigger-dep-check:
+  stage: trigger
+  trigger:
+    project: epicsoft-networks/dependencycheck
+    branch: main
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "web"'
