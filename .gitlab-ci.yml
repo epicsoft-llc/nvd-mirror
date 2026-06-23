@@ -30,6 +30,11 @@ pages:
     # bypass it via entrypoint: [""] and call vulnz directly). UseStringDeduplication is the
     # memory-saving flag the upstream docs recommend for the OutOfMemoryError.
     JAVA_OPTS: "-Xmx3277m -XX:+UseStringDeduplication"
+    # Per-request progress logging without Spring Boot's --debug noise (which prints the
+    # auto-configuration "Positive matches" report). This raises only the app/client packages to
+    # DEBUG (requests, cache hit/miss, rate limit); root/Spring stays at INFO. Relaxed binding maps
+    # LOGGING_LEVEL_IO_GITHUB_JEREMYLONG -> logging.level.io.github.jeremylong.
+    LOGGING_LEVEL_IO_GITHUB_JEREMYLONG: "DEBUG"
   script:
     - mkdir -p "$CACHE_DIR" public
     # One-time bootstrap: a full NVD build OOMs on the 4g runner, so the first cache is built
@@ -75,7 +80,7 @@ pages:
       fi
     # Incremental: vulnz reuses the existing cache and only fetches changes
     # (static files via the NVD API, generated centrally once -> consumers later pull only .json.gz).
-    - vulnz cve --cache --directory "$CACHE_DIR" --delay 6000 --maxRetry 50 --debug
+    - vulnz cve --cache --directory "$CACHE_DIR" --delay 6000 --maxRetry 50
     # Copy the generated feed into the Pages directory.
     - cp "$CACHE_DIR"/nvdcve-*.json.gz public/
     - cp "$CACHE_DIR/cache.properties" public/

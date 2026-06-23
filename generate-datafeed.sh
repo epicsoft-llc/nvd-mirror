@@ -22,9 +22,10 @@ JAVA_OPTS="${JAVA_OPTS:--Xmx8g -XX:+UseStringDeduplication}"
 docker run --rm --name nvd-data-mirror \
   -e NVD_API_KEY="${NVD_API_KEY}" \
   -e JAVA_OPTS="${JAVA_OPTS}" \
+  -e LOGGING_LEVEL_IO_GITHUB_JEREMYLONG="DEBUG" \
   -v "${OUT}:/cache" \
   --entrypoint vulnz "${IMAGE}" \
-  cve --cache --directory /cache --delay 6000 --maxRetry 50 --debug
+  cve --cache --directory /cache --delay 6000 --maxRetry 50
 
 echo "---"
 echo "Done. Generated files in ${OUT}:"
