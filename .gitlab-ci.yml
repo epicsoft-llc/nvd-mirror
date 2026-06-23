@@ -80,6 +80,8 @@ pages:
     - cp "$CACHE_DIR"/nvdcve-*.json.gz public/
     - cp "$CACHE_DIR/cache.properties" public/
     - cp "$CACHE_DIR"/*.meta public/ 2>/dev/null || true
+    # Stamp the publish time into the landing page (replaces the @LAST_UPDATE@ placeholder).
+    - sed -i "s|@LAST_UPDATE@|$(date -u '+%Y-%m-%d %H:%M')|" public/index.html
   artifacts:
     paths:
       - public
