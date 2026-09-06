@@ -13,9 +13,12 @@ NVD/Cloudflare throttle with `503` (a full run took us **>6 h**). This mirror ge
 GitLab CI (daily, schedule)
   pages job (image: open-vulnerability-data-mirror / vulnz):
     1. restore CI cache nvd-cache/        -> incremental
+       (cache lost? reseed from Pages -- all-or-nothing, else full download)
     2. vulnz cve --cache --directory nvd-cache -> fetch only changes
-    3. nvd-cache/*.json.gz + cache.properties -> public/
-    4. GitLab Pages deploys public/
+    3. verify every year in cache.properties exists and is valid gzip
+    4. nvd-cache/*.json.gz + cache.properties -> public/
+    5. GitLab Pages deploys public/
+  verify-published job: wait for the deployment to go live, purge the Cloudflare edge
         |
    Cloudflare Free (subdomain nvd.epicsoft.one, Cache Rule *.json.gz)
         |
@@ -53,11 +56,23 @@ NVD_API_KEY='<key>' ./generate-datafeed.sh
      switch to **orange** (proxied). SSL/TLS mode **Full (strict)**. *Never* "Flexible".
 5. **Cloudflare Cache Rule:** when the URI path ends with `.json.gz` → *Eligible for cache*,
    Edge TTL *Respect origin*.
+6. **Optional CI/CD variables** `CF_ZONE_ID` + `CF_API_TOKEN` (API token scope *Zone → Cache Purge*):
+   the `verify-published` job purges the Cloudflare edge after each deploy. Without them the edge
+   keeps serving the previous files until the `_headers` TTL expires — the consumer pipeline may
+   then update against yesterday's data.
 
 ## Notes
 
 - The **first CI run** downloads the full NVD (slower, hence `timeout: 3h`); subsequent runs are
   incremental via the CI cache.
+- **Seeding is all-or-nothing.** `cache.properties` holds a `lastModifiedDate` per year, so vulnz
+  skips any year listed there. If a reseed fetched `cache.properties` but lost a single `.json.gz`,
+  that year would never be regenerated and would silently disappear from the mirror — so a partial
+  seed is discarded and a full download is done instead. Before publishing, the job additionally
+  `gzip -t`s every year that `cache.properties` lists and fails rather than publish a gap.
+- The consumer pipeline is triggered only after `verify-published` has seen the new
+  `cache.properties` live on the Pages origin (the deployment is asynchronous) and purged the
+  Cloudflare edge.
 - The `.json.gz` files must be served **raw** (`Content-Type: application/gzip`, **no**
   `Content-Encoding: gzip`) — otherwise Cloudflare/clients decompress them and Dependency-Check
   receives corrupt data. Verify with `curl -sI https://nvd.epicsoft.one/nvdcve-2024.json.gz`.
