@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# One-time bootstrap helper: upload the locally-built nvd-cache to this project's GitLab generic
-# package registry so the CI 'pages' job can seed GitLab Pages once (a full NVD build OOMs on the
-# 4g CI runner). After uploading, run a web pipeline with CI variable SEED_VERSION=<version>.
+# Full rebuild: upload the locally built nvd-cache to the GitLab package registry, then run a web
+# pipeline with CI variable SEED_VERSION=<version> (a full build OOMs on the CI runner).
 #
 #   GITLAB_TOKEN='<PAT with write_package_registry>' ./seed-upload.sh
 #
@@ -39,4 +38,4 @@ done
 
 echo "---"
 echo "Uploaded ${count} files to ${PKG}/${SEED_VERSION}."
-echo "Next: run a web pipeline with CI variable SEED_VERSION=${SEED_VERSION}, then remove it."
+echo "Next: run a web pipeline with CI variable SEED_VERSION=${SEED_VERSION}, then delete the variable and the package."

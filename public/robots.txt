@@ -1,0 +1,4 @@
+# Keep crawlers off the feed files; index.html stays crawlable so its noindex meta tag is read.
+User-agent: *
+Disallow: /nvdcve-
+Disallow: /cache.properties

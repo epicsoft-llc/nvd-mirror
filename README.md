@@ -2,10 +2,9 @@
 
 Static **NVD API datafeed mirror** for [OWASP Dependency-Check](https://owasp.org/www-project-dependency-check/).
 
-Dependency-Check normally updates its CVE data through the NVD **API** — many paginated calls that
-NVD/Cloudflare throttle with `503` (a full run took us **>6 h**). This mirror generates the datafeed
-**once, centrally** and serves it as static `.json.gz` files. Consumers pull them over plain HTTP-GET
-— **no API key, no pagination, no rate limiting**, update in minutes.
+A daily CI job fetches the NVD changes with vulnz and publishes the datafeed as static `.json.gz`
+files on GitLab Pages. Consumers download them over plain HTTP — **no API key, no pagination, no
+rate limiting**.
 
 ## Architecture
 
@@ -18,9 +17,10 @@ GitLab CI (daily, schedule)
     3. verify every year in cache.properties exists and is valid gzip
     4. nvd-cache/*.json.gz + cache.properties -> public/
     5. GitLab Pages deploys public/
-  verify-published job: wait for the deployment to go live, purge the Cloudflare edge
+  verify-published job: wait for the deployment to go live
+  trigger-dep-check job: start the consumer pipeline (epicsoft-networks/dependencycheck)
         |
-   Cloudflare Free (subdomain nvd.epicsoft.one, Cache Rule *.json.gz)
+   GitLab Pages, custom domain nvd.epicsoft.one (DNS at Cloudflare, not proxied)
         |
    Consumer:  dependency-check --nvdDatafeed https://nvd.epicsoft.one/nvdcve-{0}.json.gz
 ```
@@ -32,8 +32,8 @@ dependency-check --updateonly \
   --nvdDatafeed https://nvd.epicsoft.one/nvdcve-{0}.json.gz
 ```
 
-In the sibling `dependencycheck` project this maps to `run-local-df.sh` resp. the CI `Update` job
-(`DC_DATAFEED_URL='https://nvd.epicsoft.one/nvdcve-{0}.json.gz'`).
+The `dependencycheck` project uses this URL as the default in its CI `Update` job and in
+`run-local-df.sh.example` (override: `DC_DATAFEED_URL`).
 
 ## Local generation / test
 
@@ -42,41 +42,41 @@ NVD_API_KEY='<key>' ./generate-datafeed.sh
 # produces ./nvd-cache/nvdcve-*.json.gz, nvdcve-modified.json.gz, cache.properties
 ```
 
-## One-time setup (manual)
+## Full rebuild
 
-1. **CI/CD variable** `NVD_API_KEY` (Settings → CI/CD → Variables; *masked*, no whitespace).
-2. **Pipeline schedule** (Settings → CI/CD → Pipeline schedules) → daily, target `main`.
-   (The `pages` job only runs on `schedule` or a manual web trigger.)
-3. **GitLab Pages custom domain** (Deploy → Pages → New Domain): `nvd.epicsoft.one` →
-   GitLab returns a **TXT verification record** and the CNAME target `epicsoft-networks.gitlab.io`.
-4. **Cloudflare DNS:**
-   - Add the TXT verification record (**DNS only / grey**).
-   - Add `nvd` as a **CNAME → `epicsoft-networks.gitlab.io`**.
-   - **TLS:** keep it **grey** first until GitLab has issued the Let's Encrypt certificate, then
-     switch to **orange** (proxied). SSL/TLS mode **Full (strict)**. *Never* "Flexible".
-5. **Cloudflare Cache Rule:** when the URI path ends with `.json.gz` → *Eligible for cache*,
-   Edge TTL *Respect origin*.
-6. **Optional CI/CD variables** `CF_ZONE_ID` + `CF_API_TOKEN` (API token scope *Zone → Cache Purge*):
-   the `verify-published` job purges the Cloudflare edge after each deploy. Without them the edge
-   keeps serving the previous files until the `_headers` TTL expires — the consumer pipeline may
-   then update against yesterday's data.
+Only needed if neither the CI cache nor Pages has the feed (a full build runs out of memory on the
+CI runner):
+
+1. `NVD_API_KEY='<key>' ./generate-datafeed.sh` (local, large heap)
+2. `GITLAB_TOKEN='<PAT with write_package_registry>' ./seed-upload.sh` → package `nvd-seed/<version>`
+3. Run a web pipeline with CI variable `SEED_VERSION=<version>`, then delete the variable and the
+   package.
+
+## Configuration (manual)
+
+- **CI/CD variable** `NVD_API_KEY` (masked, protected).
+- **Pipeline schedule:** daily `0 2 * * *` (Asia/Tbilisi) on `main`. The `pages` job runs only on
+  the schedule or a manual web pipeline, not on push.
+- **GitLab Pages:** custom domain `nvd.epicsoft.one` with automatic Let's Encrypt certificate;
+  unique Pages domain `nvd-mirror-6dd472.gitlab.io`.
+- **Cloudflare DNS** (zone `epicsoft.one`), both records DNS only (grey):
+  - `nvd` CNAME → `nvd-mirror-6dd472.gitlab.io`
+  - `_gitlab-pages-verification-code.nvd` TXT (GitLab domain verification)
 
 ## Notes
 
-- The **first CI run** downloads the full NVD (slower, hence `timeout: 3h`); subsequent runs are
-  incremental via the CI cache.
-- **Seeding is all-or-nothing.** `cache.properties` holds a `lastModifiedDate` per year, so vulnz
-  skips any year listed there. If a reseed fetched `cache.properties` but lost a single `.json.gz`,
-  that year would never be regenerated and would silently disappear from the mirror — so a partial
-  seed is discarded and a full download is done instead. Before publishing, the job additionally
-  `gzip -t`s every year that `cache.properties` lists and fails rather than publish a gap.
-- The consumer pipeline is triggered only after `verify-published` has seen the new
-  `cache.properties` live on the Pages origin (the deployment is asynchronous) and purged the
-  Cloudflare edge.
-- The `.json.gz` files must be served **raw** (`Content-Type: application/gzip`, **no**
-  `Content-Encoding: gzip`) — otherwise Cloudflare/clients decompress them and Dependency-Check
-  receives corrupt data. Verify with `curl -sI https://nvd.epicsoft.one/nvdcve-2024.json.gz`.
-- NVD data is US Government public domain → redistribution is permitted.
+- Daily runs are incremental (CI cache; if it is gone, reseeded from the published files) and take
+  a few minutes.
+- **Reseeding is all-or-nothing:** vulnz never re-downloads a year listed in `cache.properties`, so
+  a seed missing one year is discarded. Before publishing, every listed year is checked with
+  `gzip -t`.
+- The consumer pipeline is triggered only once `verify-published` sees the new `cache.properties`
+  live (Pages deploys asynchronously).
+- The `.json.gz` files are served **raw** (`Content-Type: application/gzip`, no
+  `Content-Encoding`); otherwise clients would decompress them and Dependency-Check would get
+  corrupt data. Check: `curl -sI https://nvd.epicsoft.one/nvdcve-2024.json.gz`.
+- Search engines: `index.html` has a `noindex` meta tag, `robots.txt` blocks the feed files
+  (GitLab Pages cannot send custom headers).
 
 ## License
 

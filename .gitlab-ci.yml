@@ -1,12 +1,10 @@
-# NVD datafeed mirror -> GitLab Pages (daily via pipeline schedule), fronted by Cloudflare.
+# NVD datafeed mirror: vulnz fetches the NVD changes daily, GitLab Pages serves the files at
+# https://nvd.epicsoft.one, then the dependencycheck pipeline is triggered.
+# GitLab Pages publishes the 'public/' artifact of the job named 'pages'.
 #
-# Requires the masked CI/CD variable NVD_API_KEY (NVD API key, no surrounding whitespace).
-# The 'pages' job is the name GitLab Pages expects; the 'public/' directory is published as the
-# Pages site.
-#
-# Optional CI/CD variables:
-#   SEED_VERSION              one-time bootstrap from the generic package registry (see below)
-#   CF_ZONE_ID / CF_API_TOKEN Cloudflare edge purge after publishing (token scope: Zone.Cache Purge)
+# CI/CD variables:
+#   NVD_API_KEY   NVD API key (masked)
+#   SEED_VERSION  full rebuild only: seed from the package registry (see seed-upload.sh)
 
 stages:
   - deploy
@@ -18,50 +16,37 @@ pages:
   image:
     name: ghcr.io/jeremylong/open-vulnerability-data-mirror:latest
     entrypoint: [""]
-  # A full NVD download (no CI cache AND nothing published yet) runs for hours; the project-level
-  # default of 1h would kill it halfway.
+  # A full NVD download takes hours; daily runs take minutes.
   timeout: 3h
   retry:
     max: 2
     when:
       - runner_system_failure
       - stuck_or_timeout_failure
-  # Schedule and a manual web trigger must not run concurrently: two vulnz runs share one CI cache
-  # key and would overwrite each other's cache.properties.
+  # Schedule and web pipelines share the CI cache; parallel vulnz runs would corrupt it.
   resource_group: pages
-  # First run downloads the full NVD (can take a while); subsequent runs are incremental.
   cache:
     key: nvd-mirror-cache-v1
     paths:
       - nvd-cache/
-  # The published Pages site is the durable fallback for the CI cache below.
   variables:
+    # Published mirror; reseed source when the CI cache is gone.
     MIRROR_BASE: "https://nvd.epicsoft.one"
-    # Use an ABSOLUTE cache dir: the vulnz wrapper resolves a relative --directory against its own
-    # workdir (/usr/local/bin), not the GitLab build dir, so a relative path makes vulnz read/write
-    # a different folder than our seed/reseed/cp -> it never finds cache.properties and always does
-    # a full download. CI cache:paths stays relative (nvd-cache/) as GitLab expects.
+    # Must be absolute: vulnz resolves a relative --directory against /usr/local/bin.
     CACHE_DIR: "${CI_PROJECT_DIR}/nvd-cache"
-    # vulnz is a Java app; the default max heap (~25% of container RAM) OOMs on a full NVD run.
-    # The vulnz CLI wrapper reads JAVA_OPTS (the docker entrypoint would use JAVA_OPT, but we
-    # bypass it via entrypoint: [""] and call vulnz directly). UseStringDeduplication is the
-    # memory-saving flag the upstream docs recommend for the OutOfMemoryError.
+    # vulnz reads JAVA_OPTS (the image entrypoint is bypassed); the default heap is too small.
     JAVA_OPTS: "-Xmx3277m -XX:+UseStringDeduplication"
-    # Per-request progress logging without Spring Boot's --debug noise (which prints the
-    # auto-configuration "Positive matches" report). This raises only the app/client packages to
-    # DEBUG (requests, cache hit/miss, rate limit); root/Spring stays at INFO. Relaxed binding maps
-    # LOGGING_LEVEL_IO_GITHUB_JEREMYLONG -> logging.level.io.github.jeremylong.
+    # Log every NVD request (vulnz only, Spring stays at INFO).
     LOGGING_LEVEL_IO_GITHUB_JEREMYLONG: "DEBUG"
   before_script:
-    # --retry-all-errors needs curl >= 7.71; degrade gracefully so an older image does not turn
-    # every fetch into an unknown-option failure (which would silently force a full download).
+    # --retry-all-errors needs curl >= 7.71.
     - |
       if curl --help all 2>/dev/null | grep -q -- --retry-all-errors; then
         CURL_RETRY="--retry 3 --retry-delay 2 --retry-all-errors"
       else
         CURL_RETRY="--retry 3 --retry-delay 2"
       fi
-    # fetch <url> <dest> -- removes the partial file and returns non-zero on failure.
+    # fetch <url> <dest>: removes the partial file on failure.
     - |
       fetch() {
         if [ -n "${AUTH_HEADER:-}" ]; then
@@ -70,13 +55,9 @@ pages:
           curl -fsSL $CURL_RETRY "$1" -o "$2"
         fi || { rm -f "$2"; return 1; }
       }
-    # seed_from <base-url> <label> -- populate $CACHE_DIR so vulnz can resume incrementally.
-    #
-    # ALL OR NOTHING: cache.properties carries a lastModifiedDate per year, so vulnz will NOT
-    # re-download a year it lists. If a single .json.gz were missing here, vulnz would skip it,
-    # the cp below would not publish it, and -- since old years practically never change upstream
-    # -- that year would vanish from the mirror permanently, with a green pipeline. So any missing
-    # feed discards the whole seed and we pay for a full download instead.
+    # seed_from <base-url> <label>: fill $CACHE_DIR so vulnz only fetches changes.
+    # All or nothing: vulnz never re-downloads a year listed in cache.properties, so a seed that
+    # misses one year would drop it from the mirror for good.
     - |
       seed_from() {
         base="$1"; label="$2"
@@ -96,39 +77,31 @@ pages:
             rm -f "$CACHE_DIR"/cache.properties "$CACHE_DIR"/nvdcve-*.json.gz "$CACHE_DIR"/nvdcve-*.meta
             return 1
           fi
-          # .meta is informational; the job copies it with "|| true" as well.
+          # .meta is optional.
           fetch "$base/nvdcve-${y}.meta" "$CACHE_DIR/nvdcve-${y}.meta" || true
         done
         echo "seeded $(ls "$CACHE_DIR"/nvdcve-*.json.gz | wc -l) feed files from $label"
       }
   script:
     - mkdir -p "$CACHE_DIR" public
-    # One-time bootstrap: a full NVD build OOMs on the 4g runner, so the first cache is built
-    # locally (generate-datafeed.sh) and uploaded to this project's generic package registry.
-    # Trigger a web pipeline with the CI variable SEED_VERSION=<version> to pull it in once; the
-    # block is inert otherwise. After the first successful publish, Pages is the durable source
-    # (reseed below) and SEED_VERSION can be removed.
+    # Full rebuild only: seed from the package registry (CI variable SEED_VERSION, see seed-upload.sh).
     - |
       if [ -n "${SEED_VERSION:-}" ] && [ ! -f "$CACHE_DIR/cache.properties" ]; then
-        echo "one-time seed: fetching prebuilt feed from package registry (nvd-seed/$SEED_VERSION)"
+        echo "seeding from the package registry (nvd-seed/$SEED_VERSION)"
         AUTH_HEADER="JOB-TOKEN: ${CI_JOB_TOKEN}"
         seed_from "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/nvd-seed/${SEED_VERSION}" \
                   "package registry nvd-seed/$SEED_VERSION" || true
         unset AUTH_HEADER
       fi
-    # Fallback if the (non-guaranteed) CI cache was evicted/cleared: reseed from the already-published
-    # Pages files so vulnz can resume incrementally instead of doing a full multi-hour NVD download.
-    # cache.properties carries the lastModified timestamps vulnz needs.
+    # CI cache gone: reseed from the published mirror instead of a full download.
     - |
       if [ ! -f "$CACHE_DIR/cache.properties" ]; then
         echo "CI cache empty -> reseeding $CACHE_DIR from $MIRROR_BASE"
         seed_from "$MIRROR_BASE" "$MIRROR_BASE" || true
       fi
-    # Incremental: vulnz reuses the existing cache and only fetches changes
-    # (static files via the NVD API, generated centrally once -> consumers later pull only .json.gz).
+    # Fetches only the changes since the last run.
     - vulnz cve --cache --directory "$CACHE_DIR" --delay 6000 --maxRetry 50
-    # Guard rail before publishing: every year cache.properties claims must exist as a readable
-    # gzip file. A silently incomplete mirror is worse for consumers than a red pipeline.
+    # Never publish a gap: every year in cache.properties must be a valid gzip file.
     - |
       broken=0
       for y in $(sed -n 's/^lastModifiedDate\.\([0-9A-Za-z]*\)=.*/\1/p' "$CACHE_DIR/cache.properties"); do
@@ -143,11 +116,10 @@ pages:
       done
       [ "$broken" -eq 0 ] || { echo "ERROR: $broken feed file(s) unusable -> refusing to publish" >&2; exit 1; }
       echo "verified $(ls "$CACHE_DIR"/nvdcve-*.json.gz | wc -l) feed files"
-    # Copy the generated feed into the Pages directory.
     - cp "$CACHE_DIR"/nvdcve-*.json.gz public/
     - cp "$CACHE_DIR/cache.properties" public/
     - cp "$CACHE_DIR"/*.meta public/ 2>/dev/null || true
-    # Stamp the publish time into the landing page (replaces the @LAST_UPDATE@ placeholder).
+    # Publish time on the landing page.
     - |
       if ! grep -q '@LAST_UPDATE@' public/index.html; then
         echo "ERROR: the @LAST_UPDATE@ placeholder is gone from public/index.html" >&2
@@ -157,15 +129,14 @@ pages:
   artifacts:
     paths:
       - public
-    # Auto-clean old daily artifacts; the latest stays published ("Keep latest artifacts").
+    # Older artifacts expire; the latest is kept ("Keep latest artifacts" is on).
     expire_in: 2 days
   tags: [ "epicsoft" ]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
-# GitLab deploys Pages asynchronously *after* the job ends, and Cloudflare caches the feed on top of
-# that. Without this gate the consumer below can update against yesterday's files and report success.
+# Pages deploys asynchronously; the consumer may only start once the new files are live.
 verify-published:
   stage: verify
   image:
@@ -178,9 +149,7 @@ verify-published:
   variables:
     MIRROR_BASE: "https://nvd.epicsoft.one"
   script:
-    # Poll the Pages origin (not the Cloudflare edge) until it serves the cache.properties we just
-    # generated. CI_PAGES_URL bypasses Cloudflare entirely; the query string is a cache buster for
-    # the MIRROR_BASE fallback.
+    # Poll until Pages serves the new cache.properties (the query string bypasses caches).
     - |
       want="$(grep '^lastModifiedDate=' public/cache.properties)"
       origin="${CI_PAGES_URL:-$MIRROR_BASE}/cache.properties?ci=${CI_PIPELINE_ID}"
@@ -196,19 +165,6 @@ verify-published:
         sleep 15
       done
       [ "$i" -lt 60 ] || { echo "ERROR: Pages is still not serving the new cache.properties after 15m" >&2; exit 1; }
-    # Drop the edge copy so consumers do not keep getting the previous day's files from Cloudflare.
-    # Without CF_ZONE_ID/CF_API_TOKEN this falls back to the origin TTLs in public/_headers.
-    - |
-      if [ -n "${CF_ZONE_ID:-}" ] && [ -n "${CF_API_TOKEN:-}" ]; then
-        echo "purging the Cloudflare cache for zone $CF_ZONE_ID"
-        curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-          --header "Authorization: Bearer ${CF_API_TOKEN}" \
-          --header "Content-Type: application/json" \
-          --data '{"purge_everything":true}' >/dev/null
-        echo "edge cache purged"
-      else
-        echo "CF_ZONE_ID/CF_API_TOKEN not set -> skipping the edge purge (relying on the _headers TTL)"
-      fi
   tags: [ "epicsoft" ]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
