@@ -67,6 +67,11 @@ pipeline that updates a Dependency-Check database from the mirror.
 
 The pipeline only runs on the **schedule** or a manual **web** pipeline, not on push.
 
+**Git tags and GitHub releases:** a git tag is the date of a `CHANGELOG.md` entry, such as `2026-10-19`, set on the
+green commit of `main` that carries the entry. Until then the entry may still grow; once tagged it is fixed, and a
+correction goes into the next entry. A tag pipeline runs only `github-release`, which waits for the tag on GitHub and
+creates the release from that entry. Tags are protected, because `GITHUB_TOKEN` is a protected variable.
+
 ## Full rebuild
 
 Only needed if Pages has lost the feed. A full build runs out of memory on the CI runner (4g), so it is built locally

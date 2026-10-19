@@ -2,7 +2,8 @@
 
 All notable changes to the NVD datafeed mirror at https://nvd.epicsoft.one.
 
-The mirror has no version number of its own; entries are dated. The feed format is the one of
+The mirror has no version number of its own; entries are dated, and each date is also a git tag with a release on
+GitHub. The feed format is the one of
 [open-vulnerability-cli (vulnz)](https://github.com/jeremylong/open-vulnerability-cli), which the CI runs from the
 `latest` image - v9.0.6 on 2026-10-19.
 
@@ -12,7 +13,7 @@ The mirror has no version number of its own; entries are dated. The feed format 
 
 ### Added
 
-- A mirror on GitHub: https://github.com/epicsoft-llc/nvd-mirror.
+- A mirror on GitHub, https://github.com/epicsoft-llc/nvd-mirror, with a release for every entry of this changelog.
 - `AGENTS.md` for contributors, and this changelog.
 - Ready-made Dependency-Check databases, rebuilt from the feed every night, CISA's known exploited vulnerabilities
   included: H2 (`db/odc.mv.db.gz`), one dump for MariaDB and MySQL (`db/dependencycheck-mysql.sql.gz`, the MySQL import
