@@ -106,7 +106,9 @@ and seeded via the GitLab generic package registry:
 - **1 GB per Pages site:** feed about 200 MB, dumps about 230 MB. At 950 MiB the `pages` job publishes the feed without
   the dumps rather than failing.
 - **One dump for MariaDB and MySQL:** the throwaway MariaDB runs with `utf8mb4_unicode_ci` (its default
-  `utf8mb4_uca1400_ai_ci` is unknown to MySQL) and a `sql_mode` without `NO_AUTO_CREATE_USER` (removed in MySQL 8);
+  `utf8mb4_uca1400_ai_ci` is unknown to MySQL) as server collation *and* through `--character-set-collations` for
+  every connection — each procedure keeps the collation of the connection that created it, and `--collation-server`
+  alone left them at uca1400 — and a `sql_mode` without `NO_AUTO_CREATE_USER` (removed in MySQL 8);
   the dump loses its first line, MariaDB's sandbox marker `/*M!999999\- … */` that stops the MySQL client, and every
   `DEFINER`. `dump:mysql` imports the result into `mysql:lts` and compares the CVE count. The image only ships MySQL
   Connector/J, so the MariaDB driver comes from Maven Central, checked against its `.sha1`.

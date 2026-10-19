@@ -221,10 +221,11 @@ dump:mysql:
     MYSQL_IMAGE: mysql:lts
   script:
     - |
-      # One dump for MariaDB and MySQL: unicode_ci instead of MariaDB's default uca1400 collation and a
-      # sql_mode without NO_AUTO_CREATE_USER - MySQL knows neither.
+      # One dump for MariaDB and MySQL: unicode_ci instead of MariaDB's default uca1400 collation - for the
+      # connections as well, the procedures keep theirs - and a sql_mode without NO_AUTO_CREATE_USER.
       docker run -d --name db --network "${NET}" -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 "${MARIADB_IMAGE}" \
         --max_allowed_packet=256M --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci \
+        --character-set-collations=utf8mb4=utf8mb4_unicode_ci \
         --sql-mode=STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION >/dev/null
       sql() { docker exec -i db mariadb -N -B "$@"; }
       # TCP only answers once the init server of the entrypoint is gone.
