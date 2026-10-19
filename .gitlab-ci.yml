@@ -1,18 +1,25 @@
-# NVD datafeed mirror: vulnz fetches the NVD changes daily, GitLab Pages serves the files at
-# https://nvd.epicsoft.one, then the dependencycheck pipeline is triggered.
-# GitLab Pages publishes the 'public/' artifact of the job named 'pages'.
+# NVD datafeed mirror: vulnz fetches the NVD changes daily, Dependency-Check builds downloadable
+# databases from them, GitLab Pages serves both at https://nvd.epicsoft.one, then the dependencycheck
+# pipeline is triggered. GitLab Pages publishes the 'public/' artifact of the job named 'pages'.
 #
 # CI/CD variables:
 #   NVD_API_KEY   NVD API key (masked)
 #   SEED_VERSION  full rebuild only: seed from the package registry (see seed-upload.sh)
 
 stages:
+  - feed
+  - dump
+  - check
   - deploy
   - verify
   - trigger
 
-pages:
-  stage: deploy
+variables:
+  # Published mirror: the feed seeds from it, dump:check and pages read the previous dumps from it.
+  MIRROR_BASE: "https://nvd.epicsoft.one"
+
+feed:
+  stage: feed
   image:
     name: ghcr.io/jeremylong/open-vulnerability-data-mirror:latest
     entrypoint: [""]
@@ -32,8 +39,6 @@ pages:
   resource_group: pages
   # No CI cache: the runner names its cache server in the job log, and the logs are public.
   variables:
-    # Published mirror: every run seeds from it, then vulnz only fetches the changes.
-    MIRROR_BASE: "https://nvd.epicsoft.one"
     # Must be absolute: vulnz resolves a relative --directory against /usr/local/bin.
     CACHE_DIR: "${CI_PROJECT_DIR}/nvd-cache"
     # vulnz reads JAVA_OPTS (the image entrypoint is bypassed); the default heap is too small.
@@ -87,7 +92,7 @@ pages:
         echo "seeded $(ls "$CACHE_DIR"/nvdcve-*.json.gz | wc -l) feed files from $label"
       }
   script:
-    - mkdir -p "$CACHE_DIR" public
+    - mkdir -p "$CACHE_DIR" feed
     # Full rebuild only: seed from the package registry (CI variable SEED_VERSION, see seed-upload.sh).
     - |
       if [ -n "${SEED_VERSION:-}" ]; then
@@ -123,20 +128,290 @@ pages:
       done
       [ "$broken" -eq 0 ] || { echo "ERROR: $broken feed file(s) unusable -> refusing to publish" >&2; exit 1; }
       echo "verified $(ls "$CACHE_DIR"/nvdcve-*.json.gz | wc -l) feed files"
-    - cp "$CACHE_DIR"/nvdcve-*.json.gz public/
-    - cp "$CACHE_DIR/cache.properties" public/
-    - cp "$CACHE_DIR"/*.meta public/ 2>/dev/null || true
-    # Publish time on the landing page.
+    - cp "$CACHE_DIR"/nvdcve-*.json.gz feed/
+    - cp "$CACHE_DIR/cache.properties" feed/
+    - cp "$CACHE_DIR"/*.meta feed/ 2>/dev/null || true
+  artifacts:
+    paths:
+      - feed
+    # Older artifacts expire; the latest is kept ("Keep latest artifacts" is on).
+    expire_in: 2 days
+  tags: [ "epicsoft" ]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# Downloadable databases: Dependency-Check fills H2, MariaDB and PostgreSQL from the new feed in
+# throwaway databases, every night from scratch - a full build takes minutes. dump:check compares the
+# three; if a dump fails, pages keeps the published ones, so the feed never waits for a database.
+.dump:
+  stage: dump
+  image: epicsoft/ci:latest
+  services:
+    - docker:dind
+  needs:
+    - job: feed
+      artifacts: true
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: /certs/client
+    DC_IMAGE: owasp/dependency-check:latest
+    # cisa.gov answers datacenter addresses with 403; CISA mirrors the same catalogue on GitHub.
+    KEV_URL: "https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json"
+  before_script:
     - |
-      if ! grep -q '@LAST_UPDATE@' public/index.html; then
-        echo "ERROR: the @LAST_UPDATE@ placeholder is gone from public/index.html" >&2
+      set -euo pipefail
+      mkdir -p db
+      NET="dump-${CI_JOB_ID}"
+      docker network create "${NET}" >/dev/null
+      # The new feed is not live yet: a web server in the job serves it to Dependency-Check.
+      docker create --name feed --network "${NET}" busybox:stable httpd -f -p 80 -h /www >/dev/null
+      docker cp feed/. feed:/www
+      docker start feed >/dev/null
+      DC_ARGS=(--updateonly --nvdDatafeed "http://feed/nvdcve-{0}.json.gz" --kevURL "${KEV_URL}"
+               --connectiontimeout 30000 --readtimeout 180000)
+      docker pull -q "${DC_IMAGE}"
+      # info <format> <file> <cves> <kev> <last modified> <engine>: what dump:check compares and lists.
+      info() {
+        (cd db && sha256sum "$2" > "$2.sha256")
+        printf 'FILE=%s\nCVES=%s\nKEV=%s\nLAST_MODIFIED=%s\nENGINE=%s\nSIZE=%s\nSHA256=%s\n' "$2" "$3" "$4" "$5" "$6" \
+          "$(stat -c %s "db/$2")" "$(cut -d' ' -f1 "db/$2.sha256")" > "db/info-$1.env"
+        cat "db/info-$1.env"
+      }
+  artifacts:
+    paths:
+      - db
+    expire_in: 2 days
+  allow_failure: true
+  # A full build takes minutes; the limit only stops a hanging run.
+  timeout: 45m
+  tags: [ "image", "epicsoft" ]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+dump:h2:
+  extends: .dump
+  script:
+    - |
+      DATA=/usr/share/dependency-check/data
+      # Dependency-Check's own H2 database. --data fixes where the file goes, the volume lets the H2 shell read it.
+      docker volume create h2 >/dev/null
+      docker create --name dc --network "${NET}" -v h2:"${DATA}" "${DC_IMAGE}" "${DC_ARGS[@]}" --data "${DATA}" >/dev/null
+      docker start -a dc
+      docker cp dc:"${DATA}/odc.mv.db" db/odc.mv.db
+      gzip -6 db/odc.mv.db
+      h2() {
+        docker run --rm -v h2:"${DATA}" --entrypoint sh "${DC_IMAGE}" -c \
+          '"${JAVA_HOME}/bin/java" -cp /usr/share/dependency-check/lib/h2-*.jar org.h2.tools.Shell -url "jdbc:h2:file:$1/odc" -user dcuser -password "DC-Pass1337!" -sql "$2"' \
+          sh "${DATA}" "$1" | sed -n '2{s/^[[:space:]]*//; s/[[:space:]]*$//; p}'
+      }
+      prop() { h2 "SELECT * FROM properties WHERE id = '$1'" | awk -F' *[|] *' '{print $2}'; }
+      LIB=$(docker run --rm --entrypoint sh "${DC_IMAGE}" -c 'ls /usr/share/dependency-check/lib')
+      info h2 odc.mv.db.gz "$(h2 'SELECT COUNT(*) FROM vulnerability')" "$(h2 'SELECT COUNT(*) FROM knownExploited')" \
+        "$(prop nvd.cache.last.modified)" "H2 $(echo "${LIB}" | sed -n 's/^h2-\(.*\)\.jar$/\1/p')"
+      printf 'DC_VERSION=%s\nSCHEMA=%s\n' "$(echo "${LIB}" | sed -n 's/^dependency-check-core-\(.*\)\.jar$/\1/p')" \
+        "$(prop version)" | tee -a db/info-h2.env
+
+dump:mysql:
+  extends: .dump
+  variables:
+    MARIADB_IMAGE: mariadb:13
+    MYSQL_IMAGE: mysql:lts
+  script:
+    - |
+      # One dump for MariaDB and MySQL: unicode_ci instead of MariaDB's default uca1400 collation and a
+      # sql_mode without NO_AUTO_CREATE_USER - MySQL knows neither.
+      docker run -d --name db --network "${NET}" -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 "${MARIADB_IMAGE}" \
+        --max_allowed_packet=256M --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci \
+        --sql-mode=STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION >/dev/null
+      sql() { docker exec -i db mariadb -N -B "$@"; }
+      # TCP only answers once the init server of the entrypoint is gone.
+      for _ in $(seq 90); do sql -h 127.0.0.1 --protocol=TCP -e 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done
+      sql -h 127.0.0.1 --protocol=TCP -e 'SELECT 1' >/dev/null
+      # Dependency-Check's own script creates the database, the account dcuser and the procedures.
+      docker run --rm --entrypoint sh "${DC_IMAGE}" -c \
+        'unzip -p /usr/share/dependency-check/lib/dependency-check-core-*.jar data/initialize_mysql.sql' | sql
+      # The image only ships MySQL Connector/J; MariaDB gets its own driver, checked against Maven Central.
+      BASE=https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client
+      V=$(curl -fsSL "${BASE}/maven-metadata.xml" | sed -n 's|.*<release>\(.*\)</release>.*|\1|p')
+      curl -fsSL -o mariadb-java-client.jar "${BASE}/${V}/mariadb-java-client-${V}.jar"
+      echo "$(curl -fsSL "${BASE}/${V}/mariadb-java-client-${V}.jar.sha1")  mariadb-java-client.jar" | sha1sum -c -
+      docker create --name dc --network "${NET}" "${DC_IMAGE}" "${DC_ARGS[@]}" \
+        --dbDriverName org.mariadb.jdbc.Driver --dbDriverPath /tmp/mariadb-java-client.jar \
+        --connectionString "jdbc:mariadb://db:3306/dependencycheck" >/dev/null
+      docker cp mariadb-java-client.jar dc:/tmp/mariadb-java-client.jar
+      docker start -a dc
+      # No DEFINER, so the procedures import under any account, and no sandbox line, where the MySQL client stops.
+      docker exec db mariadb-dump --single-transaction --routines --skip-lock-tables dependencycheck \
+        | sed -E '1{/enable the sandbox mode/d}; s#/\*!50020 DEFINER=`[^`]*`@`[^`]*`\*/ ##g; s/ DEFINER=`[^`]*`@`[^`]*`//g' \
+        | gzip -6 > db/dependencycheck-mysql.sql.gz
+      gunzip -c db/dependencycheck-mysql.sql.gz | tail -n 1 | grep -q '^-- Dump completed'
+      CVES=$(sql dependencycheck -e 'SELECT COUNT(*) FROM vulnerability')
+      # Proof for MySQL: the same file in the current MySQL LTS must give the same count.
+      docker run -d --name my --network "${NET}" -e MYSQL_ALLOW_EMPTY_PASSWORD=yes "${MYSQL_IMAGE}" >/dev/null
+      my() { docker exec -i my mysql -N -B "$@"; }
+      for _ in $(seq 90); do my -h 127.0.0.1 --protocol=TCP -e 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done
+      my -h 127.0.0.1 --protocol=TCP -e 'SELECT 1' >/dev/null
+      my -e 'CREATE DATABASE dependencycheck CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'
+      gunzip -c db/dependencycheck-mysql.sql.gz | my dependencycheck
+      if [ "$(my dependencycheck -e 'SELECT COUNT(*) FROM vulnerability')" != "${CVES}" ]; then
+        echo "ERROR: the dump gives a different CVE count in MySQL" >&2
         exit 1
       fi
+      info mysql dependencycheck-mysql.sql.gz "${CVES}" \
+        "$(sql dependencycheck -e 'SELECT COUNT(*) FROM knownExploited')" \
+        "$(sql dependencycheck -e "SELECT value FROM properties WHERE id = 'nvd.cache.last.modified'")" \
+        "MariaDB $(sql -e 'SELECT VERSION()' | cut -d- -f1), tested with MySQL $(my -e 'SELECT VERSION()')"
+
+dump:postgresql:
+  extends: .dump
+  variables:
+    POSTGRES_IMAGE: postgres:18
+  script:
+    - |
+      # Throwaway database with trust authentication; Dependency-Check works as postgres.
+      docker run -d --name db --network "${NET}" -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=dependencycheck \
+        "${POSTGRES_IMAGE}" >/dev/null
+      psql() { docker exec -i db psql -v ON_ERROR_STOP=1 -q -At -U postgres -d dependencycheck "$@"; }
+      # TCP only answers once the init server of the entrypoint is gone.
+      for _ in $(seq 90); do docker exec db pg_isready -q -h 127.0.0.1 -U postgres && break; sleep 2; done
+      docker exec db pg_isready -q -h 127.0.0.1 -U postgres
+      # Dependency-Check's script grants to dcuser but leaves creating it to the operator.
+      psql -c 'CREATE ROLE dcuser LOGIN'
+      docker run --rm --entrypoint sh "${DC_IMAGE}" -c \
+        'unzip -p /usr/share/dependency-check/lib/dependency-check-core-*.jar data/initialize_postgres.sql' | psql
+      DRIVER=$(docker run --rm --entrypoint sh "${DC_IMAGE}" -c 'ls /usr/share/dependency-check/plugins/postgresql-*.jar')
+      docker run --rm --network "${NET}" "${DC_IMAGE}" "${DC_ARGS[@]}" \
+        --dbDriverName org.postgresql.Driver --dbDriverPath "${DRIVER}" --dbUser postgres \
+        --connectionString "jdbc:postgresql://db:5432/dependencycheck"
+      # Without owner and grants the dump imports under any account.
+      docker exec db pg_dump -U postgres --no-owner --no-privileges dependencycheck \
+        | gzip -6 > db/dependencycheck-postgres.sql.gz
+      gunzip -c db/dependencycheck-postgres.sql.gz | tail -n 5 | grep -q 'PostgreSQL database dump complete'
+      info postgresql dependencycheck-postgres.sql.gz \
+        "$(psql -c 'SELECT COUNT(*) FROM vulnerability')" \
+        "$(psql -c 'SELECT COUNT(*) FROM knownExploited')" \
+        "$(psql -c "SELECT value FROM properties WHERE id = 'nvd.cache.last.modified'")" \
+        "PostgreSQL $(psql -c 'SHOW server_version' | cut -d' ' -f1)"
+
+dump:check:
+  stage: check
+  image: epicsoft/ci:latest
+  needs:
+    - job: feed
+    - job: dump:h2
+    - job: dump:mysql
+    - job: dump:postgresql
+  allow_failure: true
+  script:
+    - |
+      set -euo pipefail
+      for f in h2 mysql postgresql; do
+        [ -f "db/info-${f}.env" ] || { echo "ERROR: no result of dump:${f}" >&2; exit 1; }
+      done
+      get() { sed -n "s/^$2=//p" "db/info-$1.env"; }
+      FEED=$(sed -n 's/^lastModifiedDate=//p' feed/cache.properties | tr -d '\\')
+      echo "feed: ${FEED}"
+      ERR=0
+      # All three come from the same feed and the same Dependency-Check, so they must agree.
+      for k in CVES KEV LAST_MODIFIED; do
+        a=$(get h2 "${k}"); b=$(get mysql "${k}"); c=$(get postgresql "${k}")
+        echo "${k}: h2=${a} mysql=${b} postgresql=${c}"
+        if [ "${a}" != "${b}" ] || [ "${b}" != "${c}" ]; then echo "ERROR: ${k} differs" >&2; ERR=1; fi
+      done
+      if [ "$(get h2 LAST_MODIFIED)" != "${FEED}" ]; then echo "ERROR: the dumps are not at the feed's state" >&2; ERR=1; fi
+      if [ "$(get h2 KEV)" -eq 0 ]; then echo "ERROR: no known exploited vulnerabilities" >&2; ERR=1; fi
+      # NVD rejects CVEs now and then; a real drop against the published dumps means a broken build.
+      if PREV=$(curl -fsSL "${MIRROR_BASE}/db/db.json" | jq -er '.cves'); then
+        echo "published: ${PREV} CVEs"
+        if [ "$(get h2 CVES)" -lt $((PREV * 99 / 100)) ]; then echo "ERROR: fewer than 99 % of the published CVEs" >&2; ERR=1; fi
+      fi
+      [ "${ERR}" -eq 0 ]
+      jq -n --arg dc "$(get h2 DC_VERSION)" --arg schema "$(get h2 SCHEMA)" --arg last "$(get h2 LAST_MODIFIED)" \
+        --argjson cves "$(get h2 CVES)" --argjson kev "$(get h2 KEV)" \
+        --slurpfile files <(for f in h2 mysql postgresql; do
+          jq -n --arg format "${f}" --arg file "$(get "${f}" FILE)" --arg engine "$(get "${f}" ENGINE)" \
+            --argjson size "$(get "${f}" SIZE)" --arg sha256 "$(get "${f}" SHA256)" '{$format, $file, $engine, $size, $sha256}'
+        done) \
+        '{dependencyCheck: $dc, schema: $schema, lastModified: $last, cves: $cves, knownExploited: $kev, files: $files}' \
+        | tee db/db.json
+      touch db/ok
+  artifacts:
+    paths:
+      - db/db.json
+      - db/ok
+    expire_in: 2 days
+  tags: [ "epicsoft" ]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+pages:
+  stage: deploy
+  image: epicsoft/ci:latest
+  needs:
+    - job: feed
+    - job: dump:h2
+    - job: dump:mysql
+    - job: dump:postgresql
+    - job: dump:check
+  # One deployment at a time, in the order the feeds were built.
+  resource_group: pages
+  script:
+    - |
+      set -euo pipefail
+      cp feed/* public/
+      mkdir -p public/db
+      FILES="odc.mv.db.gz dependencycheck-mysql.sql.gz dependencycheck-postgres.sql.gz"
+      if [ -f db/ok ]; then
+        for f in ${FILES}; do cp "db/${f}" "db/${f}.sha256" public/db/; done
+        cp db/db.json public/db/
+      else
+        # The new dumps failed or disagree: last night's set stays online rather than none.
+        echo "WARNING: the new dumps are not usable, keeping the published ones" >&2
+        if curl -fsSL -o public/db/db.json "${MIRROR_BASE}/db/db.json"; then
+          for f in ${FILES}; do
+            curl -fsSL -o "public/db/${f}" "${MIRROR_BASE}/db/${f}"
+            curl -fsSL -o "public/db/${f}.sha256" "${MIRROR_BASE}/db/${f}.sha256"
+            (cd public/db && sha256sum -c "${f}.sha256")
+          done
+        else
+          rm -rf public/db
+        fi
+      fi
+      # GitLab Pages allows 1 GB per site; the feed always goes out, the dumps only while they fit.
+      if [ -d public/db ] && [ "$(du -sm public | cut -f1)" -ge 950 ]; then
+        echo "WARNING: $(du -sm public | cut -f1) MiB, publishing the feed without the dumps" >&2
+        rm -rf public/db
+      fi
+    # Landing page: publish time, and the dumps' facts from db.json - or the note that there are none.
+    - |
       sed -i "s|@LAST_UPDATE@|$(date -u '+%Y-%m-%d %H:%M')|" public/index.html
+      if [ -f public/db/db.json ]; then
+        J=public/db/db.json
+        num() { awk '{ s = $1; o = ""; while (length(s) > 3) { o = "," substr(s, length(s) - 2) o; s = substr(s, 1, length(s) - 3) } print s o }'; }
+        mib() { jq -r --arg f "$1" '.files[] | select(.format == $f) | .size' "${J}" | awk '{ printf "%.0f MiB", $1 / 1048576 }'; }
+        engine() { jq -r --arg f "$1" '.files[] | select(.format == $f) | .engine' "${J}"; }
+        sed -i -e '/<!-- db:none -->/,/<!-- \/db:none -->/d' \
+          -e "s|@DB_STATE@|$(jq -r '.lastModified' "${J}" | sed 's/T/ /; s/:[0-9]*Z$//')|g" \
+          -e "s|@CVES@|$(jq -r '.cves' "${J}" | num)|g" -e "s|@KEV@|$(jq -r '.knownExploited' "${J}" | num)|g" \
+          -e "s|@DC_VERSION@|$(jq -r '.dependencyCheck' "${J}")|g" -e "s|@SCHEMA@|$(jq -r '.schema' "${J}")|g" \
+          -e "s|@H2_SIZE@|$(mib h2)|g" -e "s|@MYSQL_SIZE@|$(mib mysql)|g" -e "s|@PG_SIZE@|$(mib postgresql)|g" \
+          -e "s|@H2_ENGINE@|$(engine h2)|g" -e "s|@MYSQL_ENGINE@|$(engine mysql)|g" -e "s|@PG_ENGINE@|$(engine postgresql)|g" \
+          public/index.html
+      else
+        sed -i '/<!-- db:files -->/,/<!-- \/db:files -->/d' public/index.html
+      fi
+      if grep -o '@[A-Z0-9_]*@' public/index.html; then
+        echo "ERROR: placeholders left in index.html" >&2
+        exit 1
+      fi
+      du -sh public public/db 2>/dev/null || true
   artifacts:
     paths:
       - public
-    # Older artifacts expire; the latest is kept ("Keep latest artifacts" is on).
     expire_in: 2 days
   tags: [ "epicsoft" ]
   rules:
@@ -153,8 +428,6 @@ verify-published:
     - job: pages
       artifacts: true
   timeout: 30m
-  variables:
-    MIRROR_BASE: "https://nvd.epicsoft.one"
   before_script:
     - apk --no-cache upgrade
   script:

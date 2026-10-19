@@ -14,12 +14,19 @@ The mirror has no version number of its own; entries are dated. The feed format 
 
 - A mirror on GitHub: https://github.com/epicsoft-llc/nvd-mirror.
 - `AGENTS.md` for contributors, and this changelog.
+- Ready-made Dependency-Check databases, rebuilt from the feed every night, CISA's known exploited vulnerabilities
+  included: H2 (`db/odc.mv.db.gz`), one dump for MariaDB and MySQL (`db/dependencycheck-mysql.sql.gz`, the MySQL import
+  is tested every night) and PostgreSQL (`db/dependencycheck-postgres.sql.gz`), each with a `.sha256`, plus
+  `db/db.json` with the Dependency-Check version, schema, counts and checksums. If a night's dumps fail their checks,
+  the previous ones stay online; the feed never waits for them.
 
 ### Changed
 
 - No CI cache any more: every run seeds from the published files (about 200 MB, about a minute) and then fetches the
   NVD changes since. A run whose seed fails stops without publishing, instead of starting a full NVD download that
   does not fit the CI runner.
+- The landing page has the look of epicsoft.one and a section for the databases; the Inter font comes from the mirror
+  itself.
 
 ### Security
 
