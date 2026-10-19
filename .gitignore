@@ -8,3 +8,6 @@ run-local.sh
 public/*.json.gz
 public/*.meta
 public/cache.properties
+
+CLAUDE.md
+.claude/

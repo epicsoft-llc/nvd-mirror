@@ -30,9 +30,10 @@ cd "${CACHE_DIR}"
 for f in nvdcve-*.json.gz cache.properties nvdcve-*.meta; do
   [ -e "$f" ] || continue
   echo "uploading ${f} ..."
-  curl -fsSL --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+  # The token goes to curl over stdin, not onto its command line.
+  curl -fsSL --header @- \
     --upload-file "$f" \
-    "${base}/${f}" >/dev/null
+    "${base}/${f}" >/dev/null <<<"PRIVATE-TOKEN: ${GITLAB_TOKEN}"
   count=$((count + 1))
 done
 

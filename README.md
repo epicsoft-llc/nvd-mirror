@@ -4,21 +4,26 @@ Static **NVD API datafeed mirror** for [OWASP Dependency-Check](https://owasp.or
 
 A daily CI job fetches the NVD changes with vulnz and publishes the datafeed as static `.json.gz`
 files on GitLab Pages. Consumers download them over plain HTTP — **no API key, no pagination, no
-rate limiting**.
+rate limiting**. Operated by [epicsoft LLC](https://epicsoft.one).
+
+* Mirror: https://nvd.epicsoft.one
+* Generator: [open-vulnerability-cli (vulnz)](https://github.com/jeremylong/open-vulnerability-cli), image `ghcr.io/jeremylong/open-vulnerability-data-mirror`
+* Repository: https://gitlab.com/epicsoft-networks/nvd-mirror, mirrored to [GitHub](https://github.com/epicsoft-llc/nvd-mirror) — issues are welcome on both; code changes only as merge requests on GitLab, the mirror overwrites anything pushed to GitHub
+* Changelog: https://gitlab.com/epicsoft-networks/nvd-mirror/-/blob/main/CHANGELOG.md
 
 ## Architecture
 
 ```
 GitLab CI (daily, schedule)
   pages job (image: open-vulnerability-data-mirror / vulnz):
-    1. restore CI cache nvd-cache/        -> incremental
-       (cache lost? reseed from Pages -- all-or-nothing, else full download)
-    2. vulnz cve --cache --directory nvd-cache -> fetch only changes
-    3. verify every year in cache.properties exists and is valid gzip
-    4. nvd-cache/*.json.gz + cache.properties -> public/
-    5. GitLab Pages deploys public/
+    1. apk upgrade                        -> current packages in the image
+    2. seed nvd-cache/ from Pages         -> all-or-nothing, otherwise the job stops
+    3. vulnz cve --cache --directory nvd-cache -> fetch only changes
+    4. verify every year in cache.properties exists and is valid gzip
+    5. nvd-cache/*.json.gz + cache.properties -> public/
+    6. GitLab Pages deploys public/
   verify-published job: wait for the deployment to go live
-  trigger-dep-check job: start the consumer pipeline (epicsoft-networks/dependencycheck)
+  trigger-dep-check job: start the downstream Dependency-Check database update
         |
    GitLab Pages, custom domain nvd.epicsoft.one (DNS at Cloudflare, not proxied)
         |
@@ -32,9 +37,6 @@ dependency-check --updateonly \
   --nvdDatafeed https://nvd.epicsoft.one/nvdcve-{0}.json.gz
 ```
 
-The `dependencycheck` project uses this URL as the default in its CI `Update` job and in
-`run-local-df.sh.example` (override: `DC_DATAFEED_URL`).
-
 ## Local generation / test
 
 ```bash
@@ -44,8 +46,7 @@ NVD_API_KEY='<key>' ./generate-datafeed.sh
 
 ## Full rebuild
 
-Only needed if neither the CI cache nor Pages has the feed (a full build runs out of memory on the
-CI runner):
+Only needed if Pages has lost the feed (a full build runs out of memory on the CI runner):
 
 1. `NVD_API_KEY='<key>' ./generate-datafeed.sh` (local, large heap)
 2. `GITLAB_TOKEN='<PAT with write_package_registry>' ./seed-upload.sh` → package `nvd-seed/<version>`
@@ -65,11 +66,15 @@ CI runner):
 
 ## Notes
 
-- Daily runs are incremental (CI cache; if it is gone, reseeded from the published files) and take
-  a few minutes.
-- **Reseeding is all-or-nothing:** vulnz never re-downloads a year listed in `cache.properties`, so
-  a seed missing one year is discarded. Before publishing, every listed year is checked with
-  `gzip -t`.
+- Daily runs are incremental: each one seeds from the published files (about 200 MB) and fetches
+  only the NVD changes since; a run takes a few minutes. There is no CI cache.
+- The vulnz image is only rebuilt with vulnz releases, so its Alpine packages fall behind between
+  them. Both jobs run `apk upgrade` first and work with current OpenSSL, curl and JDK packages.
+- Tokens stay off command lines: the scripts and the CI hand them to `curl` and `docker run` over
+  stdin or the environment.
+- **Seeding is all-or-nothing:** vulnz never re-downloads a year listed in `cache.properties`, so
+  a seed missing one year is discarded and the run stops without publishing — a full NVD download
+  does not fit the CI runner. Before publishing, every listed year is checked with `gzip -t`.
 - The consumer pipeline is triggered only once `verify-published` sees the new `cache.properties`
   live (Pages deploys asynchronously).
 - The `.json.gz` files are served **raw** (`Content-Type: application/gzip`, no
@@ -78,7 +83,15 @@ CI runner):
 - Search engines: `index.html` has a `noindex` meta tag, `robots.txt` blocks the feed files
   (GitLab Pages cannot send custom headers).
 
+## Reporting problems
+
+Issues are welcome on [GitLab](https://gitlab.com/epicsoft-networks/nvd-mirror/-/issues) and
+[GitHub](https://github.com/epicsoft-llc/nvd-mirror/issues). Please report a security problem as a
+**confidential issue** on GitLab instead of a public one.
+
 ## License
 
-This project's infrastructure (CI, scripts, HTML) is licensed under the [MIT License](LICENSE).
-The mirrored NVD data is US Government public domain.
+[MIT](https://gitlab.com/epicsoft-networks/nvd-mirror/-/blob/main/LICENSE) — Copyright (c) 2026 epicsoft LLC / Alexander Schwarz
+
+The MIT license applies only to files created by epicsoft LLC — the CI configuration, the scripts and the landing
+page. The mirrored NVD data is US Government public domain; vulnz and its image remain under their own licenses.

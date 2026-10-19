@@ -16,21 +16,23 @@ pages:
   image:
     name: ghcr.io/jeremylong/open-vulnerability-data-mirror:latest
     entrypoint: [""]
-  # A full NVD download takes hours; daily runs take minutes.
+  # Daily runs take minutes; the limit leaves room for vulnz's retries against a slow NVD API.
   timeout: 3h
   retry:
     max: 2
     when:
       - runner_system_failure
-      - stuck_or_timeout_failure
-  # Schedule and web pipelines share the CI cache; parallel vulnz runs would corrupt it.
+      - runner_external_dependency_failure
+      - runner_interrupted
+      - stuck_pending_with_matching_runners
+      - stuck_pending_no_matching_runners
+      - no_updates_running
+      - no_updates_canceling
+  # One run at a time: parallel runs would fetch the same NVD changes and race for the Pages deployment.
   resource_group: pages
-  cache:
-    key: nvd-mirror-cache-v1
-    paths:
-      - nvd-cache/
+  # No CI cache: the runner names its cache server in the job log, and the logs are public.
   variables:
-    # Published mirror; reseed source when the CI cache is gone.
+    # Published mirror: every run seeds from it, then vulnz only fetches the changes.
     MIRROR_BASE: "https://nvd.epicsoft.one"
     # Must be absolute: vulnz resolves a relative --directory against /usr/local/bin.
     CACHE_DIR: "${CI_PROJECT_DIR}/nvd-cache"
@@ -39,6 +41,8 @@ pages:
     # Log every NVD request (vulnz only, Spring stays at INFO).
     LOGGING_LEVEL_IO_GITHUB_JEREMYLONG: "DEBUG"
   before_script:
+    # The image is only rebuilt with vulnz releases; the upgrade brings the security fixes since then.
+    - apk --no-cache upgrade
     # --retry-all-errors needs curl >= 7.71.
     - |
       if curl --help all 2>/dev/null | grep -q -- --retry-all-errors; then
@@ -46,11 +50,11 @@ pages:
       else
         CURL_RETRY="--retry 3 --retry-delay 2"
       fi
-    # fetch <url> <dest>: removes the partial file on failure.
+    # fetch <url> <dest>: removes the partial file on failure; AUTH_HEADER goes to curl over stdin.
     - |
       fetch() {
         if [ -n "${AUTH_HEADER:-}" ]; then
-          curl -fsSL $CURL_RETRY --header "$AUTH_HEADER" "$1" -o "$2"
+          printf '%s\n' "$AUTH_HEADER" | curl -fsSL $CURL_RETRY --header @- "$1" -o "$2"
         else
           curl -fsSL $CURL_RETRY "$1" -o "$2"
         fi || { rm -f "$2"; return 1; }
@@ -62,18 +66,18 @@ pages:
       seed_from() {
         base="$1"; label="$2"
         if ! fetch "$base/cache.properties" "$CACHE_DIR/cache.properties"; then
-          echo "no cache.properties at $label -> full NVD download"
+          echo "no cache.properties at $label"
           return 1
         fi
         years="$(sed -n 's/^lastModifiedDate\.\([0-9A-Za-z]*\)=.*/\1/p' "$CACHE_DIR/cache.properties")"
         if [ -z "$years" ]; then
-          echo "cache.properties from $label lists no feeds -> full NVD download"
+          echo "cache.properties from $label lists no feeds"
           rm -f "$CACHE_DIR/cache.properties"
           return 1
         fi
         for y in $years; do
           if ! fetch "$base/nvdcve-${y}.json.gz" "$CACHE_DIR/nvdcve-${y}.json.gz"; then
-            echo "incomplete seed from $label (nvdcve-${y}.json.gz missing) -> discarding it, full NVD download"
+            echo "incomplete seed from $label (nvdcve-${y}.json.gz missing) -> discarding it"
             rm -f "$CACHE_DIR"/cache.properties "$CACHE_DIR"/nvdcve-*.json.gz "$CACHE_DIR"/nvdcve-*.meta
             return 1
           fi
@@ -86,18 +90,21 @@ pages:
     - mkdir -p "$CACHE_DIR" public
     # Full rebuild only: seed from the package registry (CI variable SEED_VERSION, see seed-upload.sh).
     - |
-      if [ -n "${SEED_VERSION:-}" ] && [ ! -f "$CACHE_DIR/cache.properties" ]; then
+      if [ -n "${SEED_VERSION:-}" ]; then
         echo "seeding from the package registry (nvd-seed/$SEED_VERSION)"
         AUTH_HEADER="JOB-TOKEN: ${CI_JOB_TOKEN}"
         seed_from "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/nvd-seed/${SEED_VERSION}" \
                   "package registry nvd-seed/$SEED_VERSION" || true
         unset AUTH_HEADER
       fi
-    # CI cache gone: reseed from the published mirror instead of a full download.
+    # Without a seed vulnz would start a full NVD download, which does not fit the runner: stop instead.
     - |
       if [ ! -f "$CACHE_DIR/cache.properties" ]; then
-        echo "CI cache empty -> reseeding $CACHE_DIR from $MIRROR_BASE"
-        seed_from "$MIRROR_BASE" "$MIRROR_BASE" || true
+        echo "seeding $CACHE_DIR from $MIRROR_BASE"
+        seed_from "$MIRROR_BASE" "$MIRROR_BASE" || {
+          echo "ERROR: seeding from $MIRROR_BASE failed -> nothing published (feed gone for good: README, Full rebuild)" >&2
+          exit 1
+        }
       fi
     # Fetches only the changes since the last run.
     - vulnz cve --cache --directory "$CACHE_DIR" --delay 6000 --maxRetry 50
@@ -148,6 +155,8 @@ verify-published:
   timeout: 30m
   variables:
     MIRROR_BASE: "https://nvd.epicsoft.one"
+  before_script:
+    - apk --no-cache upgrade
   script:
     # Poll until Pages serves the new cache.properties (the query string bypasses caches).
     - |

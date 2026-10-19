@@ -8,6 +8,8 @@ set -euo pipefail
 NVD_API_KEY="${NVD_API_KEY:-${DC_APIKEY:-}}"
 NVD_API_KEY="$(echo -n "${NVD_API_KEY}" | xargs)"   # strip whitespace
 [ -n "${NVD_API_KEY}" ] || { echo "ERROR: NVD_API_KEY (or DC_APIKEY) is not set." >&2; exit 1; }
+# docker run takes the key from the environment (-e NVD_API_KEY), so it stays off the command line.
+export NVD_API_KEY
 
 IMAGE="ghcr.io/jeremylong/open-vulnerability-data-mirror:latest"
 OUT="${PWD}/nvd-cache"
@@ -18,7 +20,7 @@ mkdir -p "${OUT}"
 JAVA_OPTS="${JAVA_OPTS:--Xmx8g -XX:+UseStringDeduplication}"
 
 docker run --rm --name nvd-data-mirror \
-  -e NVD_API_KEY="${NVD_API_KEY}" \
+  -e NVD_API_KEY \
   -e JAVA_OPTS="${JAVA_OPTS}" \
   -e LOGGING_LEVEL_IO_GITHUB_JEREMYLONG="DEBUG" \
   -v "${OUT}:/cache" \
